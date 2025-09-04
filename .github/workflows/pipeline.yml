@@ -1,0 +1,624 @@
+name: 🚀 pipeline
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  RELEASE: 1
+
+jobs:
+  uniffi-bindgen-linux:
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+        with:
+          target: x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/make/uniffi-bindgen
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  ffi-library-linux:
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+        with:
+          target: x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/make/ffi-library
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  bindings-swift:
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+      - uses: ./.github/actions/make/bindings-swift
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-android:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/build-android.yml
+
+  package-android:
+    env:
+      ANDROID_NDK_VERSION: 28.1.13356709
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: ubuntu-latest
+    needs:
+      - uniffi-bindgen-linux
+      - ffi-library-linux
+      - build-android
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+      - name: set up jdk 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "adopt"
+      - name: gradle setup
+        uses: gradle/actions/setup-gradle@v4
+      - name: validate gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+      - name: setup android sdk
+        uses: android-actions/setup-android@v3
+      - name: install ndk
+        run: echo "y" | sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+      - uses: ./.github/actions/make/android/package
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-jvm-linux:
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+        with:
+          target: x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/make/jvm-linux
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  bindings-jvm:
+    needs:
+      - uniffi-bindgen-linux
+      - ffi-library-linux
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+        with:
+          target: x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/make/bindings-kotlin-jvm
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-ios:
+    uses: ./.github/workflows/build-ios.yml
+
+  test-ios:
+    if: github.event_name == 'pull_request'
+    needs:
+      - build-ios
+      - bindings-swift
+    runs-on: self-hosted
+    steps:
+      - name: Cleanup on post
+        uses: gacts/run-and-post-run@v1
+        with:
+            post: |
+              sh ./scripts/clean.sh
+      - uses: actions/checkout@v5
+
+      - name: fetch uniffi bindgen artifact
+        uses: ./.github/actions/make/uniffi-bindgen
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: fetch ffi library
+        uses: ./.github/actions/make/ffi-library
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download artifacts for ios device
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-device
+
+      - name: download artifacts for ios simulator
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-simulator-arm
+
+      - name: download swift bindings
+        uses: ./.github/actions/make/bindings-swift
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4.0'
+      - name: Install swiftlint
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_UPGRADE: 1
+        run: |
+          brew install swiftlint
+      - name: Format-check and lint swift bindings
+        run: |
+          swift format lint -r -s ./crypto-ffi/bindings/swift/WireCoreCrypto
+          swiftlint --strict ./crypto-ffi/bindings/swift/WireCoreCrypto
+      - name: Format-check and lint swift interop client
+        run: |
+          swift format lint -r -s ./interop/src/clients/InteropClient
+          swiftlint --strict ./interop/src/clients/InteropClient
+      - name: Create simulator
+        run: |
+          echo "SIMULATOR=$(sh ./scripts/create-ios-sim-device.sh "iPhone 16 test-ios")" >> $GITHUB_ENV
+
+      - name: ios tests
+        run: |
+          cd crypto-ffi/bindings/swift/WireCoreCrypto
+
+          # run tests
+          xcodebuild test -scheme TestHost -configuration Release -sdk iphonesimulator \
+                          -destination 'platform=iOS Simulator,name=iPhone 16 test-ios'
+      - name: Delete simulator
+        if: always()
+        run: |
+          ./scripts/delete-ios-sim-device.sh ${{ env.SIMULATOR }}
+
+  test-android:
+    if: github.repository == 'wireapp/core-crypto' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: package-android
+    env:
+      ANDROID_NDK_VERSION: 28.1.13356709
+    steps:
+      - uses: actions/checkout@v5
+      - name: set up jdk 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "adopt"
+      - name: gradle setup
+        uses: gradle/actions/setup-gradle@v4
+      - name: validate gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+      - name: enable kvm group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: download android package
+        uses: ./.github/actions/make/android/package
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: android instrumentation tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 32
+          arch: x86_64
+          working-directory: ./crypto-ffi/bindings
+          script: ./gradlew android:connectedAndroidTest
+
+  test-jvm:
+    if: github.repository == 'wireapp/core-crypto' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs:
+      - bindings-jvm
+      - build-jvm-linux
+    steps:
+      - uses: actions/checkout@v5
+      - name: set up jdk 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "adopt"
+      - name: gradle setup
+        uses: gradle/actions/setup-gradle@v4
+      - name: validate gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: download linux library
+        uses: ./.github/actions/make/jvm-linux
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download linux bindings
+        uses: ./.github/actions/make/bindings-kotlin-jvm
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: run detekt
+        run: |
+          cd crypto-ffi/bindings
+          ./gradlew jvm:detekt
+      - name: build and test jvm package
+        run: |
+          cd crypto-ffi/bindings
+          ./gradlew jvm:build -x lint -x lintRelease
+
+  docs-jvm:
+    if: github.repository == 'wireapp/core-crypto'
+    runs-on: ubuntu-latest
+    needs:
+       - bindings-jvm
+       - build-jvm-linux
+    steps:
+      - uses: actions/checkout@v5
+      - name: set up jdk 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: "adopt"
+      - name: gradle setup
+        uses: gradle/actions/setup-gradle@v4
+      - name: validate gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: download linux library
+        uses: ./.github/actions/make/jvm-linux
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download linux bindings
+        uses: ./.github/actions/make/bindings-kotlin-jvm
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: run dokka
+        run: |
+            cd crypto-ffi/bindings
+            ./gradlew android:dokkaGeneratePublicationHtml
+            cd ..
+            mkdir -p ../target/kotlin/doc
+            cp -R bindings/android/build/dokka/html/ ../target/kotlin/doc
+      - name: upload kotlin docs
+        uses: actions/upload-artifact@v4.5.0
+        with:
+          name: kotlin
+          path: target/kotlin/doc/html
+          retention-days: 1
+          overwrite: true
+          include-hidden-files: true
+          if-no-files-found: error
+
+  create-xcframework:
+    if: github.event_name == 'pull_request'
+    needs:
+      - build-ios
+      - bindings-swift
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: download artifacts for ios device
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-device
+
+      - name: download artifacts for ios simulator
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-simulator-arm
+
+      - name: download swift bindings
+        uses: ./.github/actions/make/bindings-swift
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4.0'
+      - name: create xcframework
+        run: |
+          cd crypto-ffi/bindings/swift
+          ./build-xcframework.sh
+
+  docs-swift:
+    needs:
+      - build-ios
+      - bindings-swift
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: download swift bindings
+        uses: ./.github/actions/make/bindings-swift
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download artifacts for ios device
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-device
+
+      - name: download artifacts for ios simulator
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-simulator-arm
+
+      - name: setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4.0'
+      - name: Set up Ruby environment
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: install jazzy
+        run: gem install jazzy
+
+      - uses: swift-actions/setup-swift@v2.3.0
+        with:
+          swift-version: "6.0"
+
+      - name: swift docs
+        run: |
+          mkdir -p target/doc/core_crypto_ffi/bindings/swift
+          cd crypto-ffi/bindings/swift/WireCoreCrypto
+          jazzy \
+          	  --modules WireCoreCrypto,WireCoreCryptoUniffi \
+          	  --build-tool-arguments -project,WireCoreCrypto.xcodeproj,-scheme,WireCoreCrypto,-configuration,Release \
+          	  -o ../../../../target/swift/doc
+
+      - uses: actions/upload-artifact@v4.5.0
+        with:
+          name: swift
+          path: target/swift/doc
+          retention-days: 1
+          overwrite: true
+          include-hidden-files: true
+          if-no-files-found: error
+
+  e2e-interop-test:
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted
+    needs:
+      - build-ios
+      - bindings-swift
+      - bindings-ts
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup rust macOS
+        uses: ./.github/actions/setup-and-cache-rust
+        with:
+          rustflags: ''
+          cache-key-prefix: e2e-interop-test
+      - name: setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4.0'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install chrome-headless-shell
+        run: |
+          bun x @puppeteer/browsers install chrome-headless-shell@latest --path $PWD
+          echo "CHROME_PATH=$(echo $PWD/chrome-headless-shell/*/*/chrome-headless-shell)" >> $GITHUB_ENV
+      - name: Install chromedriver
+        run: |
+          bun x @puppeteer/browsers install chromedriver@latest --path $PWD
+          echo "CHROMEDRIVER_PATH=$(echo $PWD/chromedriver/*/*/chromedriver)" >> $GITHUB_ENV
+      - name: download web bindings
+        uses: ./.github/actions/make/web/ts
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: download artifacts for ios device
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-device
+
+      - name: download artifacts for ios simulator
+        uses: ./.github/actions/make/ios
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          task: ios-simulator-arm
+
+      - name: download swift bindings
+        uses: ./.github/actions/make/bindings-swift
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: create simulator
+        run: |
+          echo "SIMULATOR=$(./scripts/create-ios-sim-device.sh "iPhone 16 e2e-interop-test")" >> $GITHUB_ENV
+      - name: build & install iOS Interop client
+        run: |
+          cd interop/src/clients/InteropClient
+          xcodebuild -scheme InteropClient -sdk iphonesimulator -configuration Release \
+                     -destination 'platform=iOS Simulator,name=iPhone 16 e2e-interop-test' clean build install DSTROOT=./Products
+          ./install-interop-client.sh ${{ env.SIMULATOR }}
+      - name: run e2e interop test
+        run: cargo run --bin interop
+        # we separate shutdown from deletion to make sure the device is always removed, even when shutdown failed
+      - name: delete simulator
+        if: always()
+        run: |
+          ./scripts/delete-ios-sim-device.sh ${{ env.SIMULATOR }}
+
+  build-wasm:
+    runs-on: ubuntu-latest
+    env:
+      # ensures we have same flags as when publishing
+      RUSTFLAGS: "-D warnings -W unreachable-pub"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-and-cache-rust
+        with:
+          target: wasm32-unknown-unknown
+      - name: install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: build wasm
+        uses: ./.github/actions/make/web/wasm
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  bindings-ts:
+    needs: build-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: build ts
+        uses: ./.github/actions/make/web/ts
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  test-ts:
+    if: github.event_name == 'pull_request'
+    needs: bindings-ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: wireapp/setup-chrome@master
+        id: setup-chrome
+        with:
+          chrome-version: stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: download web files
+        uses: ./.github/actions/make/web/ts
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: lint
+        run: |
+          cd crypto-ffi/bindings/js
+          bun eslint . --max-warnings=0
+      - name: check all ts files
+        run: |
+          cd crypto-ffi/bindings/js
+          bun tsc --noEmit
+      - name: test
+        run: make ts-test
+
+  docs-rust:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+
+    steps:
+    - name: checkout repository
+      uses: actions/checkout@v5
+
+    - uses: ./.github/actions/setup-and-cache-rust
+      with:
+        rustflags: '-D warnings -W unreachable-pub'
+    - run: cargo doc --all --no-deps --locked
+
+    - uses: actions/upload-artifact@v4.5.0
+      with:
+        name: rust
+        path: target/doc
+        retention-days: 1
+        overwrite: true
+        include-hidden-files: true
+        if-no-files-found: error
+
+  docs-ts:
+    runs-on: ubuntu-latest
+    needs: bindings-ts
+
+    steps:
+    - name: checkout repository
+      uses: actions/checkout@v5
+
+    - name: setup bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+
+    - name: download web files
+      uses: ./.github/actions/make/web/ts
+      with:
+        gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: make ts docs
+      run: make docs-ts
+
+    - uses: actions/upload-artifact@v4.5.0
+      with:
+        name: typescript
+        path: target/typescript/doc
+        retention-days: 1
+        overwrite: true
+        include-hidden-files: true
+        if-no-files-found: error
+
+  deploy-docs:
+    runs-on: ubuntu-latest
+    if: github.repository == 'wireapp/core-crypto' && (github.ref == 'refs/heads/main' || (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')))
+    needs:
+      - docs-rust
+      - docs-ts
+      - docs-jvm
+      - docs-swift
+    env:
+      GIT_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'main' }}
+
+    steps:
+    - name: checkout repository
+      uses: actions/checkout@v5
+
+    - name: download pre-rendered docs
+      uses: actions/download-artifact@v5
+      with:
+        pattern: '{typescript,swift,kotlin,rust}'
+        path: "./target/doc/${{ env.GIT_TAG }}"
+        merge-multiple: false
+
+    - name: copy static files
+      run: |
+        cp docs/*.md target/doc/
+
+    - name: deploy docs
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_branch: gh-pages
+        publish_dir: target/doc
+        keep_files: true
+        force_orphan: false
+        enable_jekyll: true
