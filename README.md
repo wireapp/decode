@@ -4,8 +4,16 @@ Decodes and pretty prints various wire formats for the proteus and mls protocols
 
 ## Installation
 
+### Download Prebuilt Artifact
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/wireapp/decode/releases/latest/download/decode-installer.sh | sh
 ```
-cargo install --git https://github.com/wireapp/core-crypto.git[decode]
+
+### Local Build with Rust Toolchain
+
+```sh
+cargo install --git https://github.com/wireapp/decode.git
 ```
 
 ## Examples
