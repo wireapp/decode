@@ -4,6 +4,7 @@ repository = "https://github.com/wireapp/decode"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
+publish = false
 
 [lints.clippy]
 missing_safety_doc = "deny"
@@ -24,6 +25,9 @@ base64 = "0.22"
 wire-e2e-identity = { git = "https://github.com/wireapp/core-crypto.git", branch = "main", version = "0.13.0", features = [
   "builder",
 ] }
+
+[package.metadata.dist]
+dist = true
 
 # The profile that 'dist' will build with
 [profile.dist]
