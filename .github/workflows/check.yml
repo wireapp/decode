@@ -4,16 +4,14 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}-check-decode-tool"
 
 on:
+  pull_request:
   push:
-    paths:
-      - .github/workflows/check-decode-tool.yml
-      - .github/workflows/publish-decode-binary.yml
-      - "decode/**/*"
-
+    branches:
+      - main
 
 jobs:
   check:
-    if: github.repository == 'wireapp/core-crypto'
+    if: github.repository == 'wireapp/decode'
 
     strategy:
       fail-fast: false
@@ -32,4 +30,4 @@ jobs:
 
       - name: check
         run: |
-          cargo check --release -p decode --target ${{ matrix.target-triple }}
+          cargo check --release --target ${{ matrix.target-triple }}
