@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.94.1"
+channel = "1.95.0"
 components = [
   "rust-analyzer",
   "cargo",
@@ -10,9 +10,6 @@ components = [
 ]
 targets = [
   "aarch64-apple-ios",
-  "aarch64-apple-ios-sim",
-  "aarch64-linux-android",
-  "armv7-linux-androideabi",
   "x86_64-linux-android",
-  "wasm32-unknown-unknown",
+  "x86_64-pc-windows-msvc",
 ]
